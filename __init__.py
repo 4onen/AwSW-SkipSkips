@@ -1,14 +1,21 @@
 import functools
 
 import renpy
+import renpy.exports
 from renpy import ast
+from renpy.game import script
 
 from modloader.modclass import Mod, loadable_mod
 from modloader import modast
-import jz_magmalink as ml
 
 def is_skip_ahead_menu(node):
     return isinstance(node, ast.Menu) and ("Yes. I want to skip ahead." in (i[0] for i in node.items))
+
+def menu_branch_first_node(menu_node, choice):
+    branch_first_node = next((i[2][0] for i in menu_node.items if i[0] == choice), None)
+    if branch_first_node is None:
+        raise ValueError("Cannot find branch " + choice + " in the menu"+str(menu_node))
+    return branch_first_node
 
 def is_asyouwish_say(node):
     return isinstance(node, ast.Say) and node.what == "As you wish.{cps=2}..{/cps}{w=1.0}{nw}"
@@ -26,9 +33,7 @@ def menuize_skip(idx, node):
     if not is_skip_ahead_menu(skipmenu_node):
         return # No skip menu found. Unsafe to link anything
 
-    skipmenu = ml.MenuNode(skipmenu_node)
-
-    linktarget_node = skipmenu.branch("Yes. I want to skip ahead.").first_node
+    linktarget_node = menu_branch_first_node(skipmenu_node,"Yes. I want to skip ahead.")
     for _ in range(50):
         if linktarget_node is None or isinstance(linktarget_node, (ast.Jump, ast.Return)):
             return # No link target found. Unsafe to link anything.
@@ -38,10 +43,19 @@ def menuize_skip(idx, node):
         if is_asyouwish_say(linktarget_node):
             break # Found the link target.
         linktarget_node = linktarget_node.next
-    if not (isinstance(linktarget_node, modast.ASTHook) or is_asyouwish_say(linktarget_node)):
+    if is_asyouwish_say(linktarget_node):
+        # We need to find the end of the translation block,
+        # because the link target is a say statement which is always in a translation block.
+        linktarget_node = linktarget_node.next
+        if not isinstance(linktarget_node, ast.EndTranslate):
+            return # No link target found. Unsafe to link anything.
+    elif isinstance(linktarget_node, modast.ASTHook):
+        # Just hook to the ASTHook.
+        pass
+    else:
         return # No link target found. Unsafe to link anything.
 
-    continue_node = skipmenu.branch("No. Don't skip ahead.").first_node
+    continue_node = menu_branch_first_node(skipmenu_node, "No. Don't skip ahead.")
     for _ in range(50):
         if continue_node is None or isinstance(continue_node, (ast.Jump, ast.Return)):
             return # No continue node found. Unsafe to link anything.
@@ -55,10 +69,14 @@ def menuize_skip(idx, node):
         return
 
     target = 'skipskip_four_target_' + str(idx)
+    if script.has_label(target):
+        raise ValueError("Name '" + target + "' exists. Did this mod run twice?")
+    linktarget_label = ast.Label(("SkipSkips", idx), target, [], None)
+    script.namemap[target] = linktarget_label
     if isinstance(linktarget_node, modast.ASTHook):
-        ml.node(linktarget_node).link_from(target)
+        linktarget_label.next = linktarget_node
     else:
-        ml.node(linktarget_node).link_behind_from(target)
+        linktarget_label.next = linktarget_node.next
 
     def execute_skip(target, hook):
         ast.next_node(hook.next)
@@ -76,9 +94,8 @@ def menuize_skip(idx, node):
 @loadable_mod
 class MyAwSWMod(Mod):
     name = "Skip Skips"
-    version = "v1.0"
+    version = "v1.1"
     author = "4onen"
-    dependencies = ["MagmaLink"]
 
     @staticmethod
     def mod_load():
@@ -86,4 +103,4 @@ class MyAwSWMod(Mod):
 
     @staticmethod
     def mod_complete():
-        [menuize_skip(idx,n) for (idx,n) in enumerate(renpy.game.script.all_stmts) if isinstance(n, ast.Call) and n.label == 'skiptut']
+        [menuize_skip(idx,n) for (idx,n) in enumerate(script.all_stmts) if isinstance(n, ast.Call) and n.label == 'skiptut']
